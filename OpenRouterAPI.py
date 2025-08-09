@@ -9,6 +9,12 @@ credits: rburmorrison (https://github.com/rburmorrison), Google Gemini Pro 2.5, 
 license: MIT
 
 Changelog:
+- Version 0.4.5:
+  * Contribution by Scythe Eden
+  * Added _sanitize_messages_for_notifications function to remove notification lines from messages before sending to the model.
+  * Fixed streaming not working for thinking.
+  * Fixed cancel button not working.
+  * Fixed double output issue.
 - Version 0.4.4:
   * Contribution by Scythe Eden
   * Added SHOW_USAGE_STATS parameter to display token usage and cost information at the end of responses.
@@ -242,6 +248,53 @@ def _format_usage_stats(usage_data: dict) -> str:
         return ""
 
 
+# --- Helper function to remove notification lines from messages ---
+def _sanitize_messages_for_notifications(messages: list) -> list:
+    """Remove notification lines from messages before sending to the model.
+
+    This strips lines like "> *Reasoning set to ...*" and
+    "> *Ignoring providers for ...*" from both string and list-form message
+    contents so they do not persist in model context in subsequent turns.
+
+    Args:
+        messages: Message list compatible with OpenAI chat format.
+
+    Returns:
+        Sanitized message list with notification lines removed.
+    """
+    if not isinstance(messages, list):
+        return messages
+
+    def remove_notification_lines(text: str) -> str:
+        if not isinstance(text, str) or not text:
+            return text
+        lines = text.splitlines()
+        filtered_lines: list[str] = []
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("> *Reasoning set to ") and stripped.endswith("*"):
+                continue
+            if stripped.startswith("> *Ignoring providers for ") and stripped.endswith("*"):
+                continue
+            if stripped == "---":
+                continue
+            if "**Usage:**" in stripped:
+                continue
+            filtered_lines.append(line)
+        return "\n".join(filtered_lines)
+
+    for msg in messages:
+        content = msg.get("content")
+        if isinstance(content, str):
+            msg["content"] = remove_notification_lines(content)
+        elif isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "text":
+                    part_text = part.get("text", "")
+                    part["text"] = remove_notification_lines(part_text)
+    return messages
+
+
 # --- Main Pipe class ---
 class Pipe:
     class Valves(BaseModel):
@@ -347,8 +400,6 @@ class Pipe:
             }
             # --- End Filtering Logic ---
 
-
-
             for model in raw_models_data:
                 model_id = model.get("id")
                 if not model_id:
@@ -387,8 +438,6 @@ class Pipe:
 
                 formatted_name = f"{prefix}{model_name}{pricing_info}"
                 models.append({"id": model_id, "name": formatted_name})
-
-
 
             if not models:
                 if self.valves.FREE_ONLY:
@@ -600,6 +649,10 @@ class Pipe:
             url = "https://openrouter.ai/api/v1/chat/completions"
             is_streaming = body.get("stream", False)
 
+            # Ensure notifications are not included in model context
+            if "messages" in payload:
+                payload["messages"] = _sanitize_messages_for_notifications(payload["messages"])  # noqa: E501
+
             if is_streaming:
                 return self.stream_response(
                     url,
@@ -699,7 +752,6 @@ class Pipe:
             )
             response.raise_for_status()
 
-            buffer = ""
             in_think = False
             latest_citations: List[str] = []
             latest_usage = {}
@@ -744,31 +796,25 @@ class Pipe:
                         
                         first_chunk = False
 
-                    # reasoning
+                    # Stream reasoning immediately
                     if reasoning:
                         if not in_think:
-                            if buffer:
-                                yield citation_inserter(buffer, latest_citations)
-                                buffer = ""
                             yield "<think>\n"
                             in_think = True
-                        buffer += reasoning
+                        yield citation_inserter(reasoning, latest_citations)
 
-                    # content
+                    # Stream content immediately
                     if content:
                         if in_think:
-                            if buffer:
-                                yield citation_inserter(buffer, latest_citations)
-                                buffer = ""
                             yield "\n</think>\n\n"
                             in_think = False
-                        buffer += content
-                        
-                    yield content
+                        yield citation_inserter(content, latest_citations)
 
-            # flush buffer
-            if buffer:
-                yield citation_inserter(buffer, latest_citations)
+            # If model ended while still in <think>, close it
+            if in_think:
+                yield "\n</think>\n\n"
+            
+            # Append citations list
             yield citation_formatter(latest_citations)
             
             # Add usage statistics if enabled
@@ -776,6 +822,10 @@ class Pipe:
                 print(f"Usage stats: {latest_usage}")
                 yield _format_usage_stats(latest_usage)
 
+        except GeneratorExit:
+            if response:
+                response.close()
+            return
         except requests.exceptions.Timeout:
             yield f"Pipe Error: Request timed out ({timeout}s)"
         except requests.exceptions.HTTPError as e:
