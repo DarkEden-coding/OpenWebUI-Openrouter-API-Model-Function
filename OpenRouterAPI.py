@@ -1,6 +1,6 @@
 """
 title: OpenRouter Integration for OpenWebUI
-version: 0.4.4
+version: 0.4.5
 description: Integration with OpenRouter for OpenWebUI with Free Model Filtering and optional field improvements
 author: kevarch
 author_url: https://github.com/kevarch
