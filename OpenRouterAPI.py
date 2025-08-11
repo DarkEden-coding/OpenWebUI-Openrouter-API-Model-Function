@@ -265,6 +265,8 @@ def _sanitize_messages_for_notifications(messages: list) -> list:
     if not isinstance(messages, list):
         return messages
 
+    _USAGE_PATTERN = re.compile(r"\n\n---\n\*\*Usage\:\*\*.*?\$\d+\.\d{4}")
+
     def remove_notification_lines(text: str) -> str:
         if not isinstance(text, str) or not text:
             return text
@@ -276,12 +278,13 @@ def _sanitize_messages_for_notifications(messages: list) -> list:
                 continue
             if stripped.startswith("> *Ignoring providers for ") and stripped.endswith("*"):
                 continue
-            if stripped == "---":
-                continue
-            if "**Usage:**" in stripped:
-                continue
             filtered_lines.append(line)
-        return "\n".join(filtered_lines)
+
+        result = "\n".join(filtered_lines)
+
+        # Remove the token usage strings strings
+        result = re.sub(_USAGE_PATTERN, "", result)
+        return result
 
     for msg in messages:
         content = msg.get("content")
